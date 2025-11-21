@@ -59,7 +59,7 @@ def parse_file(ctx: MLContext, file: str | None) -> Operation:
     module = parser.parse_op()
     return module
 
-gamma = 0.95
+gamma = 0.70
 epsilon = 0.01
 
 class MCMCSampler:
@@ -74,7 +74,7 @@ class MCMCSampler:
     is_cond: bool
     ops: dict[OpWithSignature, tuple[float, float]] # {operator : (score, npulled)}
     timestep: int
-    pulled_operator : OpWithSignature
+    pulled_operator: OpWithSignature | None
 
     def __init__(
         self,
@@ -123,13 +123,19 @@ class MCMCSampler:
         new_cost = self.cost_func(cost_input)
 
         if (self.pulled_operator != None):
-            for op in self.ops.keys:
-                self.ops[op][0] *= gamma
-                self.ops[op][1] *= gamma
+            # print(f'pulled_operator = {self.pulled_operator}')
+            # print(f'ops_length = {len(self.ops)}')
+            for op in self.ops.keys():
+                score, npulled = self.ops[op]
+                self.ops[op] = (score * gamma, npulled * gamma)
             
             score = self.get_current_cost() - new_cost
-            self.ops[self.pulled_operator][0] += score
-            self.ops[self.pulled_operator][1] += 1
+            # Initialize the operator if it's not already in self.ops
+            if self.pulled_operator not in self.ops:
+                self.ops[self.pulled_operator] = (0, epsilon)
+            old_score, old_npulled = self.ops[self.pulled_operator]
+            self.ops[self.pulled_operator] = (old_score + score, old_npulled + 1)
+            self.pulled_operator = None
 
         return new_cost
 
@@ -171,13 +177,14 @@ class MCMCSampler:
         self.timestep += 1
         old_op = self.current.ops[idx]
         op_type = get_ret_type(old_op)
-        print(f'op_type = {op_type}')
+        # print(f'op_type = {op_type}')
 
-        values : dict[OpWithSignature, float]
+        values : dict[OpWithSignature, float] = {}
+        # Get all operations that return the target type
+        ops_with_target_type = set(self.context.dsl_ops[op_type].get_all_elements())
         for op, (score, npulled) in self.ops.items():
             # values[op] = op.score / op.npulled + 2√( alpha ln(t) / op.npulled )
-            print(f'type(op[0]) = {type(op[0])}')
-            if (op_type == get_ret_type(op[0])):
+            if op in ops_with_target_type:
                 values[op] = score / npulled + 2*sqrt(log(self.timestep) / npulled)
         
         # idx = random active operator
@@ -188,9 +195,12 @@ class MCMCSampler:
         }
 
         new_op = None
+        best_op: OpWithSignature | None = None
         while new_op is None:
             # new_op = self.context.get_random_op(get_ret_type(old_op), valid_operands)
-            best_op : OpWithSignature = max(values, key=values.get)
+            if not values:
+                raise ValueError("No valid operations available for replacement")
+            best_op = max(values.keys(), key=lambda k: values[k])
             operands_vals = tuple(valid_operands[t] for t in best_op[1])
 
             if (op_type == BOOL_T):
@@ -202,11 +212,12 @@ class MCMCSampler:
             
             del values[best_op]
         
-        set_signature_attr(new_op, old_op, op_type)
+        assert best_op is not None, "best_op should be set in the loop"
+        set_signature_attr(new_op, best_op, op_type)
 
         self.current.replace_operation(old_op, new_op, history)
 
-        self.pulled_operator = new_op
+        self.pulled_operator = best_op
 
 
     def replace_operand(self, idx: int, history: bool):
@@ -347,10 +358,12 @@ class MCMCSampler:
         if sample_mode < 0.3 and live_op_indices:
             idx = self.random.choice(live_op_indices)
             self.replace_entire_operation_chill(idx, True)
+            # print("Selected Operator: ", self.pulled_operator)
         # replace an operand in an operation
         elif sample_mode < 1 and live_op_indices:
             idx = self.random.choice(live_op_indices)
             self.replace_operand(idx, True)
+            # print("Selected Operand")
         # elif sample_mode < 1:
         #     # replace an operand in makeOp
         #     ratio = self.replace_make_operand(ops, len(ops) - 2)
