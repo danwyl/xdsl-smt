@@ -1,5 +1,6 @@
 import argparse
 import sys
+from math import sqrt, log
 from typing import Callable
 
 from xdsl.context import MLContext
@@ -14,12 +15,14 @@ from xdsl_smt.utils.synthesizer_utils.synthesizer_context import (
     get_ret_type,
     not_in_main_body,
     get_op_with_signature,
+    set_signature_attr
 )
 from xdsl_smt.utils.synthesizer_utils.dsl_operators import (
     INT_T,
     BOOL_T,
     BINT_T,
     enable_bint,
+    OpWithSignature
 )
 from xdsl_smt.utils.synthesizer_utils.random import Random
 from xdsl_smt.dialects.transfer import (
@@ -56,6 +59,8 @@ def parse_file(ctx: MLContext, file: str | None) -> Operation:
     module = parser.parse_op()
     return module
 
+gamma = 0.95
+epsilon = 0.01
 
 class MCMCSampler:
     current: MutationProgram
@@ -67,6 +72,9 @@ class MCMCSampler:
     step_cnt: int
     total_steps: int
     is_cond: bool
+    ops: dict[OpWithSignature, tuple[float, float]] # {operator : (score, npulled)}
+    timestep: int
+    pulled_operator : OpWithSignature
 
     def __init__(
         self,
@@ -95,6 +103,15 @@ class MCMCSampler:
             self.current = self.construct_init_program(func, length)
             if random_init_program:
                 self.reset_to_random_prog(length)
+        
+        self.ops = {}
+        for op in context.dsl_ops[BOOL_T].get_all_elements():
+            self.ops[op] = (0, epsilon)
+        for op in context.dsl_ops[INT_T].get_all_elements():
+            self.ops[op] = (0, epsilon)
+        
+        self.timestep = 1
+        self.pulled_operator = None
 
     def compute_cost(self, cmp: EvalResult, non_dead_code_ratio: float) -> float:
         cost_input = CostModelInput(
@@ -102,7 +119,19 @@ class MCMCSampler:
             non_dead_code_ratio,
             self.step_cnt / self.total_steps,
         )
-        return self.cost_func(cost_input)
+
+        new_cost = self.cost_func(cost_input)
+
+        if (self.pulled_operator != None):
+            for op in self.ops.keys:
+                self.ops[op][0] *= gamma
+                self.ops[op][1] *= gamma
+            
+            score = self.get_current_cost() - new_cost
+            self.ops[self.pulled_operator][0] += score
+            self.ops[self.pulled_operator][1] += 1
+
+        return new_cost
 
     def get_current_cost(self):
         return self.current_cost
@@ -123,7 +152,7 @@ class MCMCSampler:
     def replace_entire_operation(self, idx: int, history: bool):
         """
         Random pick an operation and replace it with a new one
-        """
+        """     
         old_op = self.current.ops[idx]
         valid_operands = {
             ty: self.current.get_valid_operands(idx, ty)
@@ -134,6 +163,51 @@ class MCMCSampler:
             new_op = self.context.get_random_op(get_ret_type(old_op), valid_operands)
 
         self.current.replace_operation(old_op, new_op, history)
+
+    def replace_entire_operation_chill(self, idx: int, history: bool):
+        """
+        Random pick an operation and replace it with a new one
+        """
+        self.timestep += 1
+        old_op = self.current.ops[idx]
+        op_type = get_ret_type(old_op)
+        print(f'op_type = {op_type}')
+
+        values : dict[OpWithSignature, float]
+        for op, (score, npulled) in self.ops.items():
+            # values[op] = op.score / op.npulled + 2√( alpha ln(t) / op.npulled )
+            print(f'type(op[0]) = {type(op[0])}')
+            if (op_type == get_ret_type(op[0])):
+                values[op] = score / npulled + 2*sqrt(log(self.timestep) / npulled)
+        
+        # idx = random active operator
+        
+        valid_operands = {
+            ty: self.current.get_valid_operands(idx, ty)
+            for ty in [INT_T, BOOL_T, BINT_T]
+        }
+
+        new_op = None
+        while new_op is None:
+            # new_op = self.context.get_random_op(get_ret_type(old_op), valid_operands)
+            best_op : OpWithSignature = max(values, key=values.get)
+            operands_vals = tuple(valid_operands[t] for t in best_op[1])
+
+            if (op_type == BOOL_T):
+                # build i1
+                new_op = self.context.build_i1_op(best_op[0], operands_vals)
+            else:
+                # build int
+                new_op = self.context.build_int_op(best_op[0], operands_vals)
+            
+            del values[best_op]
+        
+        set_signature_attr(new_op, old_op, op_type)
+
+        self.current.replace_operation(old_op, new_op, history)
+
+        self.pulled_operator = new_op
+
 
     def replace_operand(self, idx: int, history: bool):
         op = self.current.ops[idx]
@@ -272,7 +346,7 @@ class MCMCSampler:
         # replace an operation with a new operation
         if sample_mode < 0.3 and live_op_indices:
             idx = self.random.choice(live_op_indices)
-            self.replace_entire_operation(idx, True)
+            self.replace_entire_operation_chill(idx, True)
         # replace an operand in an operation
         elif sample_mode < 1 and live_op_indices:
             idx = self.random.choice(live_op_indices)
