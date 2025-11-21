@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# llvm and binutils
+llvm-project/
+binutils/
+
 # C extensions
 *.so
 
