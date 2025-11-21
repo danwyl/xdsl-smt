@@ -15,7 +15,24 @@ message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 
 # Set LLVM and Clang components
-llvm_map_components_to_libnames(LLVM_LIBS core target x86TargetMCA x86Disassembler x86AsmParser x86CodeGen x86Desc x86Info)
+# llvm_map_components_to_libnames(LLVM_LIBS core target x86TargetMCA x86Disassembler x86AsmParser x86CodeGen x86Desc x86Info)
+set(LLVM_COMPONENTS
+  Core
+  Support
+  Analysis
+  OrcJIT
+  OrcShared
+  OrcTargetProcess
+  ExecutionEngine
+  RuntimeDyld
+  Object
+  MC
+  Target
+  IRReader
+  Passes
+  native        # expands to host NativeTarget + friends (arm64 on Apple Silicon)
+)
+llvm_map_components_to_libnames(LLVM_LIBS ${LLVM_COMPONENTS})
 set(CLANG_LIBS clang-cpp)
 
 set(GENERATED_HEADER ${CMAKE_BINARY_DIR}/APInt_bin_string.h)
@@ -97,5 +114,7 @@ add_dependencies(eval_engine generate_header)
 target_link_libraries(xfer_enum PRIVATE ${LLVM_LIBS} ${CLANG_LIBS})
 target_link_libraries(eval_engine PRIVATE ${LLVM_LIBS} ${CLANG_LIBS})
 
-target_link_options(eval_engine PRIVATE -Wl,--copy-dt-needed-entries)
-target_link_options(xfer_enum PRIVATE -Wl,--copy-dt-needed-entries)
+if(UNIX AND NOT APPLE)
+  target_link_options(eval_engine PRIVATE -Wl,--copy-dt-needed-entries)
+  target_link_options(xfer_enum PRIVATE -Wl,--copy-dt-needed-entries)
+endif()
