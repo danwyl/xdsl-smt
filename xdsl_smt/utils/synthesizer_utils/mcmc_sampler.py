@@ -59,8 +59,9 @@ def parse_file(ctx: MLContext, file: str | None) -> Operation:
     module = parser.parse_op()
     return module
 
-gamma = 0.70
+gamma = 0.83
 epsilon = 0.01
+beta = 1.4
 
 class MCMCSampler:
     current: MutationProgram
@@ -182,10 +183,16 @@ class MCMCSampler:
         values : dict[OpWithSignature, float] = {}
         # Get all operations that return the target type
         ops_with_target_type = set(self.context.dsl_ops[op_type].get_all_elements())
+        pulled = 1
+        for _, (score, npulled) in self.ops.items():
+            pulled += npulled
+
+        # print(f'pulled = {pulled}, timestep = {self.timestep}')
+
         for op, (score, npulled) in self.ops.items():
             # values[op] = op.score / op.npulled + 2√( alpha ln(t) / op.npulled )
             if op in ops_with_target_type:
-                values[op] = score / npulled + 2*sqrt(log(self.timestep) / npulled)
+                values[op] = score / npulled + 2*sqrt(beta * log(pulled) / npulled)
         
         # idx = random active operator
         
